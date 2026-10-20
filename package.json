@@ -14,8 +14,9 @@
   "license": "ISC",
   "description": "",
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20251115.0",
-    "typescript": "^5.9.3",
-    "wrangler": "^4.47.0"
+    "@cloudflare/workers-types": "^5.20261019.1",
+    "@types/bun": "^1.4.3",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.151.3"
   }
 }
