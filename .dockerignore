@@ -1,0 +1,8 @@
+node_modules
+.wrangler
+kv-data
+kbbi-dataset-kbbi-v-main/csv
+.git
+.claude
+*.log
+.env
