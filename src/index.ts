@@ -19,12 +19,18 @@ interface KBBIEntry {
       bentuk_tidak_baku: string[];
       varian: string[];
       makna: Array<{
-        kelas: string[];
+        kelas: Array<{ kode: string; nama: string; deskripsi: string }>;
         submakna: string[];
         info: string;
         contoh: string[];
       }>;
-      etimologi: string | null;
+      etimologi: {
+        kelas: string[];
+        bahasa: string;
+        asal_kata: string;
+        pelafalan: string;
+        arti: string[];
+      } | null;
       kata_turunan: string[];
       gabungan_kata: string[];
       peribahasa: string[];
@@ -67,6 +73,31 @@ function levenshteinDistance(str1: string, str2: string): number {
   }
 
   return matrix[str2.length][str1.length];
+}
+
+// Parsed indexes are cached per isolate/process so they aren't re-parsed on every request
+let wordIndexCache: string[] | null = null;
+let nonStandardIndexCache: Record<string, string> | null = null;
+
+async function getWordIndex(env: Env): Promise<string[] | null> {
+  if (!wordIndexCache) {
+    const indexData = await env.KBBI_DATA.get('__index_words__');
+    if (indexData) wordIndexCache = JSON.parse(indexData);
+  }
+  return wordIndexCache;
+}
+
+async function getNonStandardIndex(env: Env): Promise<Record<string, string> | null> {
+  if (!nonStandardIndexCache) {
+    const indexData = await env.KBBI_DATA.get('__index_non_standard__');
+    if (indexData) nonStandardIndexCache = JSON.parse(indexData);
+  }
+  return nonStandardIndexCache;
+}
+
+function parseLimit(value: string | null, fallback: number): number {
+  const limit = parseInt(value || '');
+  return Number.isNaN(limit) ? fallback : Math.min(Math.max(limit, 1), 50);
 }
 
 // Router
@@ -217,28 +248,28 @@ async function handleNonStandardCheck(request: Request, env: Env, params: any): 
 
   const decodedWord = decodeURIComponent(word).toLowerCase();
 
-  // Get list of all words (we'll need to implement a separate index for this)
-  // For now, we'll check if the word exists and look at bentuk_tidak_baku
   const data = await env.KBBI_DATA.get(decodedWord);
+  const entry: KBBIEntry | null = data ? JSON.parse(data) : null;
 
-  if (!data) {
-    // Check if this word is listed as non-standard in any other entry
-    const indexData = await env.KBBI_DATA.get('__index_non_standard__');
-    if (indexData) {
-      const nonStandardIndex = JSON.parse(indexData);
-      const standardForm = nonStandardIndex[decodedWord];
+  // Many non-standard forms (e.g. "apotik") have their own entry that only points to the
+  // standard form ("→ apotek"), so check the non-standard index unless the entry has a real meaning
+  const isPointerOnly = !entry || entry.data.entri.every(e =>
+    e.makna.every(m => m.submakna.every(s => s.startsWith('→')))
+  );
+  const nonStandardIndex = await getNonStandardIndex(env);
+  const standardForm = nonStandardIndex?.[decodedWord];
 
-      if (standardForm) {
-        return new Response(JSON.stringify({
-          is_standard: false,
-          word: decodedWord,
-          standard_form: standardForm,
-        }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        });
-      }
-    }
+  if (standardForm && isPointerOnly) {
+    return new Response(JSON.stringify({
+      is_standard: false,
+      word: decodedWord,
+      standard_form: standardForm,
+    }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  }
 
+  if (!entry) {
     return new Response(JSON.stringify({
       is_standard: false,
       word: decodedWord,
@@ -247,9 +278,6 @@ async function handleNonStandardCheck(request: Request, env: Env, params: any): 
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   }
-
-  const entry: KBBIEntry = JSON.parse(data);
-  const hasNonStandard = entry.data.entri.some(e => e.bentuk_tidak_baku.length > 0);
 
   return new Response(JSON.stringify({
     is_standard: true,
@@ -263,7 +291,7 @@ async function handleNonStandardCheck(request: Request, env: Env, params: any): 
 async function handleSimilarWords(request: Request, env: Env, params: any): Promise<Response> {
   const { word } = params;
   const url = new URL(request.url);
-  const limit = parseInt(url.searchParams.get('limit') || '5');
+  const limit = parseLimit(url.searchParams.get('limit'), 5);
 
   if (!word) {
     return new Response(JSON.stringify({ error: 'Word parameter is required' }), {
@@ -274,9 +302,8 @@ async function handleSimilarWords(request: Request, env: Env, params: any): Prom
 
   const decodedWord = decodeURIComponent(word).toLowerCase();
 
-  // Get word index
-  const indexData = await env.KBBI_DATA.get('__index_words__');
-  if (!indexData) {
+  const wordList = await getWordIndex(env);
+  if (!wordList) {
     return new Response(JSON.stringify({
       error: 'Word index not found',
       suggestions: []
@@ -286,10 +313,9 @@ async function handleSimilarWords(request: Request, env: Env, params: any): Prom
     });
   }
 
-  const wordList: string[] = JSON.parse(indexData);
-
-  // Calculate Levenshtein distance for all words
+  // Calculate Levenshtein distance, skipping words whose length alone rules them out
   const distances = wordList
+    .filter(w => Math.abs(w.length - decodedWord.length) <= 3)
     .map(w => ({
       word: w,
       distance: levenshteinDistance(decodedWord, w),
@@ -313,7 +339,7 @@ async function handleSimilarWords(request: Request, env: Env, params: any): Prom
 async function handleSearchWords(request: Request, env: Env, params: any): Promise<Response> {
   const url = new URL(request.url);
   const query = url.searchParams.get('q');
-  const limit = parseInt(url.searchParams.get('limit') || '10');
+  const limit = parseLimit(url.searchParams.get('limit'), 10);
 
   if (!query) {
     return new Response(JSON.stringify({ error: 'Query parameter (q) is required' }), {
@@ -324,9 +350,8 @@ async function handleSearchWords(request: Request, env: Env, params: any): Promi
 
   const searchQuery = query.toLowerCase();
 
-  // Get word index
-  const indexData = await env.KBBI_DATA.get('__index_words__');
-  if (!indexData) {
+  const wordList = await getWordIndex(env);
+  if (!wordList) {
     return new Response(JSON.stringify({
       error: 'Word index not found',
       results: []
@@ -336,20 +361,17 @@ async function handleSearchWords(request: Request, env: Env, params: any): Promi
     });
   }
 
-  const wordList: string[] = JSON.parse(indexData);
-
-  // Search for words that start with or contain the query
-  const results = wordList
-    .filter(w => w.includes(searchQuery))
-    .sort((a, b) => {
-      // Prioritize words that start with the query
-      const aStarts = a.startsWith(searchQuery);
-      const bStarts = b.startsWith(searchQuery);
-      if (aStarts && !bStarts) return -1;
-      if (!aStarts && bStarts) return 1;
-      return a.localeCompare(b);
-    })
-    .slice(0, limit);
+  // The index is sorted, so take words that start with the query first, then words that
+  // contain it, stopping as soon as we have enough
+  const results: string[] = [];
+  for (const w of wordList) {
+    if (results.length >= limit) break;
+    if (w.startsWith(searchQuery)) results.push(w);
+  }
+  for (const w of wordList) {
+    if (results.length >= limit) break;
+    if (!w.startsWith(searchQuery) && w.includes(searchQuery)) results.push(w);
+  }
 
   return new Response(JSON.stringify({
     query: searchQuery,
@@ -365,8 +387,8 @@ async function handleSearchWords(request: Request, env: Env, params: any): Promi
 }
 
 async function handleStats(request: Request, env: Env, params: any): Promise<Response> {
-  const indexData = await env.KBBI_DATA.get('__index_words__');
-  const wordCount = indexData ? JSON.parse(indexData).length : 0;
+  const wordList = await getWordIndex(env);
+  const wordCount = wordList ? wordList.length : 0;
 
   return new Response(JSON.stringify({
     total_words: wordCount,
@@ -400,7 +422,7 @@ export default {
     router.get('/api/similar/:word', handleSimilarWords);
     router.get('/api/search', handleSearchWords);
     router.get('/api/stats', handleStats);
-    router.get('/', async (request, env, params) => {
+    const handleInfo = async () => {
       return new Response(JSON.stringify({
         message: 'KBBI API - Indonesian Dictionary API',
         version: '1.0.0',
@@ -411,7 +433,9 @@ export default {
           'Content-Type': 'application/json'
         },
       });
-    });
+    };
+    router.get('/', handleInfo);
+    router.get('/api', handleInfo);
 
     return router.handle(request, env);
   },

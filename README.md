@@ -1,6 +1,6 @@
 # KBBI API - Indonesian Dictionary API
 
-Backend API for the KBBI Assistant mobile app, deployed on Cloudflare Workers.
+Backend API for the KBBI Assistant mobile app, deployed on Cloudflare Workers or self-hosted with Docker, plus a lightweight web app.
 
 ## Features
 
@@ -220,6 +220,31 @@ npm run deploy
 ```
 
 Your API will be deployed to `https://kbbi-api.your-subdomain.workers.dev`
+
+## Self-Hosting with Docker (e.g. Coolify)
+
+The `Dockerfile` runs the same API on [Bun](https://bun.sh) together with the web app, with no Cloudflare account needed. Instead of KV, `src/server.ts` loads the dataset into memory at startup (~125 MB RAM).
+
+```bash
+docker build -t kbbi-api .
+docker run -p 3000:3000 kbbi-api
+```
+
+- `/` and `/kata/:word`: web app
+- `/api/*`: API
+
+On Coolify, create an application from this repo with the **Dockerfile** build pack and expose port `3000`.
+
+## Web App
+
+A lightweight Preact app lives in [`web/`](web/) (~12 KB gzipped). It has search with autocomplete, word pages, standard-form hints and typo suggestions.
+
+```bash
+cd web
+npm install
+npm run dev      # proxies /api to http://localhost:3000 (set API_URL to use `wrangler dev` on :8787)
+npm run build    # outputs web/dist, which the Docker server serves
+```
 
 ## Usage in React Native App
 

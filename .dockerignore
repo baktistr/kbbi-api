@@ -6,3 +6,5 @@ kbbi-dataset-kbbi-v-main/csv
 .claude
 *.log
 .env
+web/node_modules
+web/dist
